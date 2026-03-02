@@ -32,19 +32,92 @@ pub fn main(init: std.process.Init) !void {
         if (byte == MARKER) {
             const next_byte = try file_reader_intf.takeByte();
             std.log.debug("{X}:\n", .{MARKER});
+            if (0xF & (next_byte >> 4) == 0xE) { // APP MARKER
+                switch (0xF & next_byte) {
+                    0x0 => { // APP0
+                        var buf: [1024]u8 = undefined;
+                        const out = try read_payload(file_reader_intf, &buf);
+                        std.debug.print("APP{d}:\n", .{0xF & next_byte});
+
+                        var start: usize = 0;
+                        var end: usize = 5;
+                        const identifier = out[start..end]; // null terminated
+                        std.debug.print("\tidentifier: {s}\n", .{identifier});
+                        const JFIF = [5]u8{ 0x4A, 0x46, 0x49, 0x46, 0x00 };
+                        const JFXX = [5]u8{ 0x4A, 0x46, 0x58, 0x58, 0x00 };
+
+                        if (std.mem.eql(u8, identifier, &JFIF)) { // JFIF
+                            start = end;
+                            end = start + 2;
+                            const version_bytes = out[start..end];
+                            const major: u8 = version_bytes[0];
+                            const minor: u8 = version_bytes[1];
+                            std.debug.print("\tversion: {d}.{d:0>2}\n", .{ major, minor });
+
+                            start = end;
+                            end = start + 1;
+                            const density = out[start..end];
+                            std.debug.print("\tdensity: {x}\n", .{density});
+
+                            start = end;
+                            end = start + 2;
+                            const Xdensity_bytes = out[start..end];
+                            const Xdensity = std.mem.readInt(u16, Xdensity_bytes[0..2], .big);
+                            std.debug.print("\tXdensity: {d}: (hex: {X})\n", .{ Xdensity, Xdensity });
+
+                            start = end;
+                            end = start + 2;
+                            const Ydensity_bytes = out[start..end];
+                            const Ydensity = std.mem.readInt(u16, Ydensity_bytes[0..2], .big);
+                            std.debug.print("\tYdensity: {d} (hex: {X})\n", .{ Ydensity, Ydensity });
+
+                            start = end;
+                            end = start + 1;
+                            const Xthumbnail_bytes = out[start..end];
+                            const Xthumbnail = std.mem.readInt(u8, Xthumbnail_bytes[0..1], .big);
+                            std.debug.print("\tXthumbnail: {d}\n", .{Xthumbnail});
+
+                            start = end;
+                            end = start + 1;
+                            const Ythumbnail_bytes = out[start..end];
+                            const Ythumbnail = std.mem.readInt(u8, Ythumbnail_bytes[0..1], .big);
+                            std.debug.print("\tYthumbnail: {d}\n", .{Ythumbnail});
+
+                            // Thumbnail data
+                            // Uncompressed 24 bit RGB (8 bits per color channel) raster thumbnail data in the order R0, G0, B0, ... Rn-1, Gn-1, Bn-1;
+                            // n = Xthumbnail × Ythumbnail
+                            // 3 × n
+                            if ((Xthumbnail != 0 and Ythumbnail != 0)) {
+                                start = end;
+                                end = (Xthumbnail * Ythumbnail) * 3;
+                                const thumbnail_bytes = out[start..end];
+                                std.debug.print("Thumbnail bytes: [{x}]", .{thumbnail_bytes});
+                            }
+                        } else if (std.mem.eql(u8, identifier, &JFXX)) { // JFXX
+                            // TODO: implement
+                            return error.NotImplementd;
+                        }
+
+                        continue;
+                    },
+                    0x1...0xF => {
+                        var buf: [1024]u8 = undefined;
+                        const out = try read_payload(file_reader_intf, &buf);
+                        std.debug.print("APP{d}: {s}\n\n", .{ 0xF & next_byte, out });
+                        continue;
+                    },
+                    else => unreachable,
+                }
+            }
             switch (next_byte) {
+                MARKER_FILL => continue,
                 MARKER_CODE_SOI => std.debug.print("SOI[{X}]\n", .{next_byte}),
                 MARKER_CODE_EOI => {
-                    std.debug.print("EOI[{X}]", .{next_byte});
+                    std.debug.print("EOI[{X}]\n", .{next_byte});
                     return std.process.cleanExit(io);
                 },
-                MARKER_FILL => {
-                    // std.debug.print("Fill[{X}]", .{next_byte});
-                },
-                JFIF_APP0 => {
-                    var buf: [1024]u8 = undefined;
-                    const out = try read_payload(file_reader_intf, &buf);
-                    std.debug.print("APP0: {s}\n\n", .{out});
+                MARKER_BYTE_STUFFING => {
+                    std.log.debug("Stuffing: [{X}]", .{next_byte});
                 },
                 COM => {
                     var buf: [1024]u8 = undefined;
@@ -71,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
                 },
 
                 else => {
-                    std.debug.print("{X:0>2}\n", .{next_byte});
+                    std.debug.print("UNHANDLED MARKER: {X:0>2}\n", .{next_byte});
                     continue;
                 },
             }
@@ -91,7 +164,9 @@ fn read_payload(reader: *std.Io.Reader, buf: []u8) ![]u8 {
 const MARKER = 0xFF;
 const MARKER_CODE_SOI = 0xD8; // start of image
 const MARKER_CODE_EOI = 0xD9; // end of image
-const MARKER_FILL = 0x00; // Fill inside entropy-coded scan data
+const MARKER_FILL = 0xFF;
+const MARKER_BYTE_STUFFING = 0x00; // Fill inside entropy-coded scan data
+
 const JFIF_APP0 = 0xE0;
 const COM = 0xFE; // Comments
 const DHT = 0xC4; // Define Huffman Table
