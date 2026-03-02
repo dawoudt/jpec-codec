@@ -108,13 +108,13 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
             switch (next_byte) {
-                MARKER_FILL => continue,
-                MARKER_CODE_SOI => std.debug.print("SOI[{X}]\n", .{next_byte}),
-                MARKER_CODE_EOI => {
+                FILL => continue,
+                SOI => std.debug.print("SOI[{X}]\n", .{next_byte}),
+                EOI => {
                     std.debug.print("EOI[{X}]\n", .{next_byte});
                     return std.process.cleanExit(io);
                 },
-                MARKER_BYTE_STUFFING => {
+                BYTE_STUFFING => {
                     std.log.debug("Stuffing: [{X}]", .{next_byte});
                 },
                 COM => {
@@ -143,12 +143,64 @@ pub fn main(init: std.process.Init) !void {
                 SOF0 => {
                     var buf: [4096]u8 = undefined;
                     const out = try read_payload(file_reader_intf, &buf);
-                    std.debug.print("Start of Frame: {any}\n\n", .{out});
+                    const precision_bytes = out[0..2];
+                    const precision = std.mem.readInt(u16, precision_bytes[0..2], .big);
+                    std.debug.print("Start of Frame: {any}\n", .{out});
+                    std.debug.print("\tPrecision: {d}\n", .{precision});
                 },
                 SOF2 => {
                     var buf: [4096]u8 = undefined;
                     const out = try read_payload(file_reader_intf, &buf);
-                    std.debug.print("Start of Frame 2: {any}\n\n", .{out});
+                    std.debug.print("Start of Frame 2: \n", .{});
+                    // for (out) |value| {
+                    //     std.debug.print("{X:0>2} ", .{value});
+                    // }
+                    // std.debug.print("\n", .{});
+                    var start: usize = 0;
+                    var end: usize = start + 1;
+
+                    const precision: u8 = @intCast(out[start]);
+                    std.debug.print("\tPrecision: {d}\n", .{precision});
+
+                    start = end;
+                    end = start + 2;
+                    const height_bytes: []u8 = out[start..end];
+                    const height: u16 = std.mem.readInt(u16, height_bytes[0..2], .big);
+                    std.debug.print("\tHeight: {d}\n", .{height});
+
+                    start = end;
+                    end = start + 2;
+                    const width_bytes: []u8 = out[start..end];
+                    const width: u16 = std.mem.readInt(u16, width_bytes[0..2], .big);
+                    std.debug.print("\tWidth: {d}\n", .{width});
+
+                    start = end;
+                    end = start + 1;
+
+                    const num_of_components: u8 = @intCast(out[start]);
+                    std.debug.print("\tNumber of Components: {d}\n", .{num_of_components});
+                    var component_counter: usize = 0;
+                    while (component_counter < num_of_components) : (component_counter += 1) {
+                        start = end;
+                        end = start + 1;
+                        const component_id: u8 = @intCast(out[start]);
+                        const component: Component = @enumFromInt(component_id);
+
+                        start = end;
+                        end = start + 1;
+                        const sample: u8 = @intCast(out[start]);
+                        const horizontal_sample = sample & 0xF;
+                        const vertical_sample = (sample >> 4) & 0xF;
+                        start = end;
+                        end = start + 1;
+                        const dct_tbl_num: u8 = @intCast(out[start]);
+                        std.debug.print("\t    Component: {s}\n\t    Horizontal sample: {d}\n\t    Vertical sample: {d}\n\t    Qunatization Table: {d}\n\n", .{
+                            @tagName(component),
+                            horizontal_sample,
+                            vertical_sample,
+                            dct_tbl_num,
+                        });
+                    }
                 },
 
                 else => {
@@ -170,18 +222,22 @@ fn read_payload(reader: *std.Io.Reader, buf: []u8) ![]u8 {
 }
 
 const MARKER = 0xFF;
-const MARKER_CODE_SOI = 0xD8; // start of image
-const MARKER_CODE_EOI = 0xD9; // end of image
-const MARKER_FILL = 0xFF;
-const MARKER_BYTE_STUFFING = 0x00; // Fill inside entropy-coded scan data
-
-const JFIF_APP0 = 0xE0;
+const SOI = 0xD8; // start of image
+const EOI = 0xD9; // end of image
+const FILL = 0xFF;
+const BYTE_STUFFING = 0x00; // Fill inside entropy-coded scan data
 const COM = 0xFE; // Comments
 const DHT = 0xC4; // Define Huffman Table
 const DQT = 0xDB; // Define Quantization Table
 const SOS = 0xDA; // Start of scan
 const SOF0 = 0xC0; // Start of Frame
-const SOF2 = 0xC2; // Start of Frame
+const SOF2 = 0xC2; // Start of Frame 2
 
 const JFIF = [5]u8{ 0x4A, 0x46, 0x49, 0x46, 0x00 }; // JFIF\0
 const JFXX = [5]u8{ 0x4A, 0x46, 0x58, 0x58, 0x00 }; // JFXX\0
+
+const Component = enum(u3) {
+    Luminence = 1,
+    BlueChroma = 2,
+    RedChroma = 3,
+};
