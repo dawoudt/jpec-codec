@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     // The 0.16 way: Target, optimize, and entry point live on the Module!
     const exe = b.addExecutable(.{
-        .name = "juicy-app",
+        .name = "jpeg-codec",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -23,6 +23,6 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the juicy application");
+    const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_cmd.step);
 }
