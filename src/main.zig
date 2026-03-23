@@ -263,6 +263,8 @@ fn print_bytes(str: []u8, comptime fmt: ByteRepresentation) void {
     std.debug.print("\n\n", .{});
 }
 
+const QuantizationTable = struct {};
+
 const HuffmanTable = struct {
     tbl_num: usize,
     data_len: u16,
@@ -271,6 +273,7 @@ const HuffmanTable = struct {
     class: u4,
     dst_id: u4,
     counts: [16]u8,
+    num_of_symbols: usize,
     symbols: []u8,
     table: std.AutoHashMap(u32, u8),
 
@@ -298,7 +301,8 @@ const HuffmanTable = struct {
             .class = @truncate(data[0] >> 4),
             .dst_id = @truncate(data[0] & 0x0F),
             .counts = data[1..17].*,
-            .symbols = data[17 .. 17 + num_of_symbols],
+            .symbols = data[17..],
+            .num_of_symbols = num_of_symbols,
             .table = std.AutoHashMap(u32, u8).init(allocator),
         };
         try ht.build_table();
@@ -318,16 +322,19 @@ const HuffmanTable = struct {
                 symbol_idx += 1; // increment the symbol_idx
                 std.log.debug("code += 1: {d}\n", .{code});
             }
-            code = code << 1; // when we move to next count, we shift left (or append 0 to the right);
+            code <<= 1; // when we move to next count, we shift left (or append 0 to the right);
             std.log.debug("code = code << 1: {d}\n", .{code});
         }
     }
 
     fn print_table(self: HuffmanTable) void {
         var it = self.table.iterator();
-        std.debug.print("-------------------Huffman Table--------------------\n", .{});
+        std.debug.print("  ------ Huffman Table Data ------\n", .{});
+        std.debug.print("\t  {s: <7}| {s: <10}\n", .{ "code", "symbol" });
+        std.debug.print("\t  {s:-<7}+{s:-<10}\n", .{ "", "" });
+
         while (it.next()) |entry| {
-            std.debug.print("\tCode: {d:>5} | symbol: {d}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            std.debug.print("\t  {d: <7}| {d: <10}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
     }
 
@@ -335,6 +342,7 @@ const HuffmanTable = struct {
         std.debug.print("Huffman Table {d}: \n", .{self.tbl_num});
         std.debug.print("\tClass table: {d}\n\tTable Destination ID: {d}\n", .{ self.class, self.dst_id });
         std.debug.print("\tCounts: {any}\n", .{self.counts});
+        std.debug.print("\tNumber of Symbols: {any}\n", .{self.num_of_symbols});
         std.debug.print("\tSymbols: {any}\n", .{self.symbols});
 
         print_bytes(self.data_raw, .small_hex);
