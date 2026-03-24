@@ -161,8 +161,8 @@ pub fn main(init: std.process.Init) !void {
                     dqt_num += 1;
                     var buf: [4096]u8 = undefined;
                     const out = try read_payload(file_reader_intf, &buf);
-                    std.debug.print("Define Quantization Table {d}: \n", .{dqt_num});
-                    print_bytes(out, .small_hex);
+                    const dqt = QuantizationTable.initFromPayload(dqt_num, out);
+                    dqt.print();
                 },
                 SOS => {
                     sos_num += 1;
@@ -253,7 +253,7 @@ fn read_payload(reader: *std.Io.Reader, buf: []u8) ![]u8 {
 }
 
 fn print_bytes(str: []u8, comptime fmt: ByteRepresentation) void {
-    std.debug.print("\tRaw: ", .{});
+    std.debug.print("\tRaw: {s}: ", .{@tagName(fmt)});
     for (str) |b| {
         switch (fmt) {
             .small_hex, .big_hex => std.debug.print("{" ++ [_]u8{@intFromEnum(fmt)} ++ ":0>2} ", .{b}),
@@ -263,7 +263,36 @@ fn print_bytes(str: []u8, comptime fmt: ByteRepresentation) void {
     std.debug.print("\n\n", .{});
 }
 
-const QuantizationTable = struct {};
+const QuantizationTable = struct {
+    tbl_num: usize,
+    precision: usize,
+    dst_id: u4,
+    data_len: u16,
+    data_raw: []u8,
+    quantization_values: []u8,
+
+    pub fn initFromPayload(num: usize, data: []u8) QuantizationTable {
+        const precision_nibble: u4 = @truncate(data[0] >> 4);
+        const precision: usize = if (precision_nibble == 0) 64 else 128;
+        return .{
+            .tbl_num = num,
+            .precision = precision,
+            .dst_id = @truncate(data[0] & 0x0F),
+            .data_len = @intCast(data.len),
+            .data_raw = data,
+            .quantization_values = data[1..precision],
+            // TODO: Define quantization values (can be multiple)
+        };
+    }
+
+    pub fn print(self: QuantizationTable) void {
+        std.debug.print("\nQuantization Table {d}: \n", .{self.tbl_num});
+        std.debug.print("\tPrecision: {d}\n", .{self.precision});
+        std.debug.print("\tTable Destination ID: {d}\n", .{self.dst_id});
+        std.debug.print("\tQuantization Values: {any}\n", .{self.quantization_values});
+        print_bytes(self.data_raw, .small_hex);
+    }
+};
 
 const HuffmanTable = struct {
     tbl_num: usize,
@@ -296,7 +325,7 @@ const HuffmanTable = struct {
 
         var ht: HuffmanTable = .{
             .tbl_num = num,
-            .data_len = @intCast(data.len + 2),
+            .data_len = @intCast(data.len),
             .data_raw = data,
             .class = @truncate(data[0] >> 4),
             .dst_id = @truncate(data[0] & 0x0F),
@@ -341,13 +370,14 @@ const HuffmanTable = struct {
 
     pub fn print(self: HuffmanTable) void {
         std.debug.print("Huffman Table {d}: \n", .{self.tbl_num});
-        std.debug.print("\tClass table: {d}\n\tTable Destination ID: {d}\n", .{ self.class, self.dst_id });
+        std.debug.print("\tClass table: {d}\n", .{self.class});
+        std.debug.print("\tTable Destination ID: {d}\n", .{self.dst_id});
         std.debug.print("\tCounts: {any}\n", .{self.counts});
         std.debug.print("\tNumber of Symbols: {any}\n", .{self.num_of_symbols});
         std.debug.print("\tSymbols: {any}\n", .{self.symbols});
 
         print_bytes(self.data_raw, .small_hex);
-        if (std_options.log_level == .info) self.print_table();
+        if (std_options.log_level == .debug) self.print_table();
     }
 };
 
