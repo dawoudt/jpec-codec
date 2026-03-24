@@ -310,6 +310,7 @@ const HuffmanTable = struct {
     }
 
     fn build_table(self: *HuffmanTable) !void {
+        // TODO: Fix so that we CAN parse mutiple tables out of the payload.
         // TODO: Maybe Use ArrayList(.{.code, .value}) instead so its ordered.
         // Although then it would be O(N) instead of O(1)
         var code: u32 = 0;
@@ -349,6 +350,8 @@ const HuffmanTable = struct {
         if (std_options.log_level == .info) self.print_table();
     }
 };
+
+// TODO: Write test for multiple tables extracted from DHT payload.
 
 test "parse DC luminance huffman table" {
     var payload = [_]u8{
