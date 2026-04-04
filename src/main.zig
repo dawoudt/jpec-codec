@@ -57,7 +57,10 @@ pub fn main(init: std.process.Init) !void {
     while (true) {
         const byte = try file_reader_intf.takeByte();
         if (byte == MARKER) {
-            const next_byte = try file_reader_intf.takeByte();
+            var next_byte = try file_reader_intf.takeByte();
+            while (next_byte == FILL) // we eat the byte if its a FILL bytes
+                next_byte = try file_reader_intf.takeByte();
+
             std.log.debug("Marker: {X}:\n", .{MARKER});
             if (0xF & (next_byte >> 4) == 0xE) { // APP MARKER
                 switch (0xF & next_byte) {
@@ -114,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
                             // 3 × n
                             if ((Xthumbnail != 0 and Ythumbnail != 0)) {
                                 start = end;
-                                end = (Xthumbnail * Ythumbnail) * 3;
+                                end = start + (Xthumbnail * Ythumbnail) * 3;
                                 const thumbnail_bytes = out[start..end];
                                 std.debug.print("Thumbnail bytes: [{x}]", .{thumbnail_bytes});
                             }
@@ -135,7 +138,6 @@ pub fn main(init: std.process.Init) !void {
                 }
             }
             switch (next_byte) {
-                FILL => continue,
                 SOI => std.debug.print("SOI: {X}\n", .{next_byte}),
                 EOI => {
                     std.debug.print("EOI: {X}\n", .{next_byte});
@@ -153,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
                     dht_num += 1;
                     var buf: [4096]u8 = undefined;
                     var dht: HuffmanTable = try .init(dht_num, file_reader_intf, &buf, alloc);
-                    defer dht.deinit();
+                    defer dht.deinit(alloc);
                     dht.print();
                     // dht.print_table();
                 },
@@ -161,7 +163,8 @@ pub fn main(init: std.process.Init) !void {
                     dqt_num += 1;
                     var buf: [4096]u8 = undefined;
                     const out = try read_payload(file_reader_intf, &buf);
-                    const dqt = QuantizationTable.initFromPayload(dqt_num, out);
+                    var dqt = try QuantizationTable.initFromPayload(dqt_num, out, alloc);
+                    defer dqt.deinit(alloc);
                     dqt.print();
                 },
                 SOS => {
@@ -271,18 +274,24 @@ const QuantizationTable = struct {
     data_raw: []u8,
     quantization_values: []u8,
 
-    pub fn initFromPayload(num: usize, data: []u8) QuantizationTable {
+    pub fn initFromPayload(num: usize, data: []u8, allocator: std.mem.Allocator) !QuantizationTable {
         const precision_nibble: u4 = @truncate(data[0] >> 4);
         const precision: usize = if (precision_nibble == 0) 64 else 128;
+
         return .{
             .tbl_num = num,
             .precision = precision,
             .dst_id = @truncate(data[0] & 0x0F),
             .data_len = @intCast(data.len),
-            .data_raw = data,
-            .quantization_values = data[1..precision],
+            .data_raw = try allocator.dupe(u8, data),
+            .quantization_values = try allocator.dupe(u8, data[1 .. precision + 1]),
             // TODO: Define quantization values (can be multiple)
         };
+    }
+
+    pub fn deinit(self: *QuantizationTable, allocator: std.mem.Allocator) void {
+        allocator.free(self.quantization_values);
+        allocator.free(self.data_raw);
     }
 
     pub fn print(self: QuantizationTable) void {
@@ -301,36 +310,34 @@ const HuffmanTable = struct {
 
     class: u4,
     dst_id: u4,
-    counts: [16]u8,
+    counts: []u8,
     num_of_symbols: usize,
     symbols: []u8,
     table: std.AutoHashMap(u32, u8),
 
-    pub fn deinit(self: *HuffmanTable) void {
+    pub fn deinit(self: *HuffmanTable, allocator: std.mem.Allocator) void {
         self.table.deinit();
+        allocator.free(self.counts);
+        allocator.free(self.symbols);
+        allocator.free(self.data_raw);
     }
 
     pub fn init(num: usize, reader: *std.Io.Reader, buf: []u8, allocator: std.mem.Allocator) !HuffmanTable {
-        const s1: u8 = try reader.takeByte();
-        const s2: u8 = try reader.takeByte();
-        const len: u16 = std.mem.readInt(u16, &[2]u8{ s1, s2 }, .big);
-        const payload_len = len - 2;
-        try reader.readSliceAll(buf[0..payload_len]);
-        return initFromPayload(num, buf[0..payload_len], allocator);
+        const out = try read_payload(reader, buf);
+        return initFromPayload(num, out[0..], allocator);
     }
 
     pub fn initFromPayload(num: usize, data: []u8, allocator: std.mem.Allocator) !HuffmanTable {
         var num_of_symbols: usize = 0;
         for (data[1..17]) |s| num_of_symbols += s;
-
         var ht: HuffmanTable = .{
             .tbl_num = num,
             .data_len = @intCast(data.len),
-            .data_raw = data,
+            .data_raw = try allocator.dupe(u8, data),
             .class = @truncate(data[0] >> 4),
             .dst_id = @truncate(data[0] & 0x0F),
-            .counts = data[1..17].*,
-            .symbols = data[17..],
+            .counts = try allocator.dupe(u8, data[1..17]),
+            .symbols = try allocator.dupe(u8, data[17 .. 17 + num_of_symbols]),
             .num_of_symbols = num_of_symbols,
             .table = std.AutoHashMap(u32, u8).init(allocator),
         };
@@ -344,10 +351,11 @@ const HuffmanTable = struct {
         // Although then it would be O(N) instead of O(1)
         var code: u32 = 0;
         var symbol_idx: usize = 0; // this is global as we need to remember what we've proccesed.
-        for (self.counts) |length| { // each item from the counts array is the length for the symbols sub set
+        for (self.counts, 1..) |length, bit_len| { // each item from the counts array is the length for the symbols sub set
             for (0..length) |_| { // iterate over the subset from 0 to length
                 const symbol = self.symbols[symbol_idx]; // grab the symbol at the symbol_idx
-                try self.table.put(code, symbol); // add it to the table
+                const key: u32 = @intCast(bit_len << 16 | code);
+                try self.table.put(key, symbol); // add it to the table
                 code += 1; // increment the code
                 symbol_idx += 1; // increment the symbol_idx
                 std.log.debug("code += 1: {d}\n", .{code});
@@ -382,8 +390,7 @@ const HuffmanTable = struct {
 };
 
 // TODO: Write test for multiple tables extracted from DHT payload.
-
-test "parse DC luminance huffman table" {
+test "parse DC luminance huffman table - code verification" {
     var payload = [_]u8{
         0x00, // class=0 (DC), dest=0
         0x00,
@@ -415,9 +422,33 @@ test "parse DC luminance huffman table" {
         0x0A,
         0x0B,
     };
-
     var ht: HuffmanTable = try .initFromPayload(0, &payload, std.testing.allocator);
-    defer ht.deinit();
+    defer ht.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 12), ht.table.count());
+
+    // 00 (len=2, code=0) → 0x00
+    try std.testing.expectEqual(@as(u8, 0x00), ht.table.get(2 << 16 | 0).?);
+    // 010 (len=3, code=2) → 0x01
+    try std.testing.expectEqual(@as(u8, 0x01), ht.table.get(3 << 16 | 2).?);
+    // 011 (len=3, code=3) → 0x02
+    try std.testing.expectEqual(@as(u8, 0x02), ht.table.get(3 << 16 | 3).?);
+    // 100 (len=3, code=4) → 0x03
+    try std.testing.expectEqual(@as(u8, 0x03), ht.table.get(3 << 16 | 4).?);
+    // 101 (len=3, code=5) → 0x04
+    try std.testing.expectEqual(@as(u8, 0x04), ht.table.get(3 << 16 | 5).?);
+    // 110 (len=3, code=6) → 0x05
+    try std.testing.expectEqual(@as(u8, 0x05), ht.table.get(3 << 16 | 6).?);
+    // 1110 (len=4, code=14) → 0x06
+    try std.testing.expectEqual(@as(u8, 0x06), ht.table.get(4 << 16 | 14).?);
+    // 11110 (len=5, code=30) → 0x07
+    try std.testing.expectEqual(@as(u8, 0x07), ht.table.get(5 << 16 | 30).?);
+    // 111110 (len=6, code=62) → 0x08
+    try std.testing.expectEqual(@as(u8, 0x08), ht.table.get(6 << 16 | 62).?);
+    // 1111110 (len=7, code=126) → 0x09
+    try std.testing.expectEqual(@as(u8, 0x09), ht.table.get(7 << 16 | 126).?);
+    // 11111110 (len=8, code=254) → 0x0A
+    try std.testing.expectEqual(@as(u8, 0x0A), ht.table.get(8 << 16 | 254).?);
+    // 111111110 (len=9, code=510) → 0x0B
+    try std.testing.expectEqual(@as(u8, 0x0B), ht.table.get(9 << 16 | 510).?);
 }
